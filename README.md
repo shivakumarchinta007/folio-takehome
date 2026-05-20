@@ -1,5 +1,3 @@
-Here it is as one clean block to paste directly into your README.md file:
-
 Folio Take-Home — Shiva Kumar
 A small document-sharing app, extended with scheduled publishing, human-readable slugs, and title search.
 Setup
