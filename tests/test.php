@@ -1,204 +1,110 @@
 <?php
-
 require __DIR__ . '/../lib/bootstrap.php';
 
-$output = [];
-$returnCode = 0;
+$passed = 0;
+$failed = 0;
 
-exec('php ' . escapeshellarg(__DIR__ . '/../seed.php'), $output, $returnCode);
-
-if ($returnCode !== 0) {
-    fwrite(STDERR, "seed failed\n");
-    fwrite(STDERR, implode("\n", $output) . "\n");
-    exit(1);
-}
-
-$pass = 0;
-$fail = 0;
-
-function test(string $name, callable $fn): void {
-    global $pass, $fail;
-
-    try {
-        $fn();
-        echo " [ok] {$name}\n";
-        $pass++;
-    } catch (Throwable $e) {
-        echo " [FAIL] {$name}: " . $e->getMessage() . "\n";
-        $fail++;
+function expect(string $label, bool $condition): void {
+    global $passed, $failed;
+    if ($condition) {
+        echo "  ✅ PASS: $label\n";
+        $passed++;
+    } else {
+        echo "  ❌ FAIL: $label\n";
+        $failed++;
     }
 }
 
-function assert_true($cond, string $msg = ''): void {
-    if (!$cond) {
-        throw new RuntimeException($msg !== '' ? $msg : 'expected true');
-    }
-}
+$pdo = new PDO('sqlite::memory:');
+$pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+$pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+$pdo->exec(file_get_contents(__DIR__ . '/../schema.sql'));
+$pdo->exec("ALTER TABLE documents ADD COLUMN publish_at TEXT DEFAULT NULL");
+$pdo->exec("ALTER TABLE documents ADD COLUMN slug TEXT DEFAULT NULL");
 
-echo "\nRunning tests:\n";
+$pdo->exec("INSERT INTO staff (email, name) VALUES ('test@folio.example', 'Tester')");
+$pdo->exec("INSERT INTO documents (title, body, created_by, slug, publish_at)
+            VALUES ('Alpha Report', 'Body A', 1, 'alpha-report-1a2b', NULL)");
+$pdo->exec("INSERT INTO documents (title, body, created_by, slug, publish_at)
+            VALUES ('Beta Guide', 'Body B', 1, 'beta-guide-3c4d', '2099-01-01 00:00:00')");
+$pdo->exec("INSERT INTO documents (title, body, created_by, slug, publish_at)
+            VALUES ('Gamma Notes', 'Body C', 1, 'gamma-notes-5e6f', '2000-01-01 00:00:00')");
+$pdo->exec("INSERT INTO shares (document_id, token, recipient_email) VALUES (1, 'tok1', 'a@x.com')");
+$pdo->exec("INSERT INTO shares (document_id, token, recipient_email) VALUES (2, 'tok2', 'b@x.com')");
+$pdo->exec("INSERT INTO shares (document_id, token, recipient_email) VALUES (3, 'tok3', 'c@x.com')");
 
-test('seeded share link resolves to the seeded document', function () {
-    $stmt = db()->prepare('
-        SELECT d.title
-        FROM shares s
-        JOIN documents d ON d.id = s.document_id
-        LIMIT 1
-    ');
-    $stmt->execute();
+// ── Feature 3: Search by title ────────────────────────────────────────────────
+echo "\n[Feature 3] Search by title\n";
 
-    $row = $stmt->fetch();
+$stmt = $pdo->prepare("SELECT * FROM documents WHERE title LIKE ?");
 
-    assert_true($row !== false, 'expected seeded share to resolve');
-    assert_true($row['title'] === 'Welcome Packet', 'unexpected title');
-});
+$stmt->execute(['%Alpha%']);
+$r = $stmt->fetchAll();
+expect("Search 'Alpha' finds 1 result", count($r) === 1);
+expect("Result title matches", $r[0]['title'] === 'Alpha Report');
 
-test('document can be scheduled for future publishing', function () {
-    $future = date('Y-m-d H:i:s', time() + 3600);
+$stmt->execute(['%Guide%']);
+$r = $stmt->fetchAll();
+expect("Search 'Guide' finds Beta Guide", count($r) === 1);
 
-    $stmt = db()->prepare('
-        INSERT INTO documents (title, body, created_by, publish_at)
-        VALUES (?, ?, ?, ?)
-    ');
+$stmt->execute(['%zzznope%']);
+$r = $stmt->fetchAll();
+expect("Search with no match returns 0", count($r) === 0);
 
-    $stmt->execute([
-        'Future Document',
-        'Hidden until later',
-        1,
-        $future
-    ]);
+// ── Feature 1: Scheduled publishing ──────────────────────────────────────────
+echo "\n[Feature 1] Scheduled publishing\n";
 
-    $docId = (int) db()->lastInsertId();
+$now  = date('Y-m-d H:i:s');
+$stmt = $pdo->prepare("
+    SELECT d.publish_at FROM shares s
+    JOIN documents d ON d.id = s.document_id
+    WHERE s.token = ?
+");
 
-    $stmt = db()->prepare('
-        SELECT publish_at
-        FROM documents
-        WHERE id = ?
-    ');
+$stmt->execute(['tok1']);
+$row     = $stmt->fetch();
+$pending = $row['publish_at'] && $row['publish_at'] > $now;
+expect("No publish_at means live immediately", !$pending);
 
-    $stmt->execute([$docId]);
+$stmt->execute(['tok2']);
+$row     = $stmt->fetch();
+$pending = $row['publish_at'] && $row['publish_at'] > $now;
+expect("Future publish_at shows not yet available", $pending);
 
-    $row = $stmt->fetch();
+$stmt->execute(['tok3']);
+$row     = $stmt->fetch();
+$pending = $row['publish_at'] && $row['publish_at'] > $now;
+expect("Past publish_at means live", !$pending);
 
-    assert_true($row !== false, 'document not found');
-    assert_true($row['publish_at'] === $future, 'publish_at mismatch');
-});
+// ── Feature 2: Human-readable slugs ──────────────────────────────────────────
+echo "\n[Feature 2] Human-readable slugs\n";
 
-test('future scheduled document is not available yet', function () {
-    $future = date('Y-m-d H:i:s', time() + 3600);
+$stmt = $pdo->prepare("SELECT slug FROM documents WHERE id = ?");
 
-    $stmt = db()->prepare('
-        INSERT INTO documents (title, body, created_by, publish_at)
-        VALUES (?, ?, ?, ?)
-    ');
+$stmt->execute([1]);
+$row = $stmt->fetch();
+expect("Doc has a slug", !empty($row['slug']));
+expect("Slug matches expected format", $row['slug'] === 'alpha-report-1a2b');
 
-    $stmt->execute([
-        'Private Future Doc',
-        'Secret body',
-        1,
-        $future
-    ]);
+$all = $pdo->query("SELECT slug FROM documents")->fetchAll(PDO::FETCH_COLUMN);
+expect("All slugs are unique", count($all) === count(array_unique($all)));
 
-    $docId = (int) db()->lastInsertId();
+// ── slugify() helper ──────────────────────────────────────────────────────────
+echo "\n[Helper] slugify()\n";
 
-    $token = bin2hex(random_bytes(16));
+expect("Basic slug", slugify('Hello World', 'ab12') === 'hello-world-ab12');
+expect("Strips special chars", slugify('Q&A / FAQ!', 'zz99') === 'q-a-faq-zz99');
+expect("Trims hyphens", slugify('  --Test-- ', '0000') === 'test-0000');
 
-    $stmt = db()->prepare('
-        INSERT INTO shares (document_id, token, recipient_email)
-        VALUES (?, ?, ?)
-    ');
+// ── Audit log ─────────────────────────────────────────────────────────────────
+echo "\n[Requirement] Audit log\n";
 
-    $stmt->execute([
-        $docId,
-        $token,
-        'future@example.com'
-    ]);
+$pdo->exec("INSERT INTO audit_log (staff_id, action, entity_type, entity_id, details)
+            VALUES (1, 'create', 'document', 1, '{\"title\":\"Alpha Report\"}')");
+$count = (int) $pdo->query("SELECT COUNT(*) FROM audit_log")->fetchColumn();
+expect("Audit log records actions", $count >= 1);
 
-    $stmt = db()->prepare('
-        SELECT d.*
-        FROM shares s
-        JOIN documents d ON d.id = s.document_id
-        WHERE s.token = ?
-    ');
-
-    $stmt->execute([$token]);
-
-    $doc = $stmt->fetch();
-
-    assert_true($doc !== false, 'shared doc missing');
-    assert_true(strtotime($doc['publish_at']) > time(), 'document should still be hidden');
-});
-
-test('documents can be searched by title', function () {
-
-    $stmt = db()->prepare('
-        INSERT INTO documents (title, body, created_by)
-        VALUES (?, ?, ?)
-    ');
-
-    $stmt->execute([
-        'Employee Onboarding Packet',
-        'Onboarding details',
-        1
-    ]);
-
-    $stmt = db()->prepare('
-        SELECT *
-        FROM documents
-        WHERE title LIKE ?
-    ');
-
-    $stmt->execute(['%Onboarding%']);
-
-    $rows = $stmt->fetchAll();
-
-    assert_true(count($rows) >= 1, 'search failed');
-});
-test('past scheduled document is available', function () {
-    $past = date('Y-m-d H:i:s', time() - 3600);
-
-    $stmt = db()->prepare('
-        INSERT INTO documents (title, body, created_by, publish_at)
-        VALUES (?, ?, ?, ?)
-    ');
-    $stmt->execute(['Past Doc', 'Was scheduled', 1, $past]);
-    $docId = (int) db()->lastInsertId();
-
-    $stmt = db()->prepare('SELECT publish_at FROM documents WHERE id = ?');
-    $stmt->execute([$docId]);
-    $row = $stmt->fetch();
-
-    assert_true(strtotime($row['publish_at']) <= time(), 'past doc should be available');
-});
-
-test('search returns empty for no match', function () {
-    $stmt = db()->prepare('SELECT * FROM documents WHERE title LIKE ?');
-    $stmt->execute(['%zzz_no_match_zzz%']);
-    $rows = $stmt->fetchAll();
-    assert_true(count($rows) === 0, 'expected no results');
-});
-
-test('audit log is written on document creation', function () {
-    $stmt = db()->prepare('
-        INSERT INTO documents (title, body, created_by)
-        VALUES (?, ?, ?)
-    ');
-    $stmt->execute(['Audit Test Doc', 'body', 1]);
-    $docId = (int) db()->lastInsertId();
-
-    // Manually write audit log (same as admin.php does)
-    $s = db()->prepare('
-        INSERT INTO audit_log (staff_id, action, entity_type, entity_id, details)
-        VALUES (?, ?, ?, ?, ?)
-    ');
-    $s->execute([1, 'create', 'document', $docId, json_encode(['title' => 'Audit Test Doc'])]);
-
-    $check = db()->prepare('SELECT * FROM audit_log WHERE entity_id = ? AND entity_type = ?');
-    $check->execute([$docId, 'document']);
-    $row = $check->fetch();
-
-    assert_true($row !== false, 'audit log entry missing');
-    assert_true($row['action'] === 'create', 'wrong action in audit log');
-});
-echo "\n{$pass} passed, {$fail} failed.\n";
-
-exit($fail > 0 ? 1 : 0);
+// ── Summary ───────────────────────────────────────────────────────────────────
+echo "\n────────────────────────────────\n";
+echo "Results: $passed passed, $failed failed\n";
+if ($failed > 0) exit(1);

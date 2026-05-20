@@ -1,106 +1,47 @@
-# Folio
+Here it is as one clean block to paste directly into your README.md file:
 
-A lightweight PHP + SQLite document-sharing app where staff create documents and share them with recipients via secure one-time links.
-
----
-
-## Features Implemented
-
-### 1. Scheduled Publishing
-Staff can prepare a document in advance and have it go live at a specific date and time.
-
-- Added `publish_at` column to the documents table via schema migration
-- Added optional datetime field in the admin UI
-- Share links return **HTTP 404** (not 200) before the publish time — recipients cannot tell if a token is wrong or the document is just not live yet
-- Admin document list shows **SCHEDULED** or **LIVE** badge per document
-- Automated tests cover future scheduling, past scheduling, and access blocking
-
-### 2. Search by Title
-Staff can find documents by title instantly from the admin page.
-
-- Substring match using SQLite `LIKE` with `%term%`
-- Case-insensitive — matches any part of the title
-- Safe from SQL injection via prepared statements
-- Automated tests cover match, no-match, and case-insensitivity
-
-### 3. Audit Logging
-Every document creation and share action is recorded.
-
-- Logs staff ID, action, entity type, entity ID, and details (including `publish_at`)
-- Follows the existing audit pattern in `lib/bootstrap.php` consistently
-
----
-
-## Design Decisions
-
-### Why HTTP 404 for scheduled documents?
-A 200 response with a countdown page leaks that a document exists at that token. Returning 404 keeps it indistinguishable from an invalid token — better privacy for recipients.
-
-### Why keep token-based share links?
-Readable IDs are guessable. Secure random tokens protect recipient privacy. Search solves the staff usability problem without compromising the access control model.
-
-### Why SQLite LIKE for search?
-The app is intentionally lightweight. Substring matching is built into SQLite, requires zero extra dependencies, and works well at internal staff scale. With more time I would explore SQLite FTS5 for larger document sets.
-
-### Why datetime-local input?
-Native browser support keeps the UI simple with no JavaScript dependencies. The T separator from HTML is converted to a space before storing in SQLite (`2026-05-20T09:00` → `2026-05-20 09:00:00`).
-
----
-
-## Code Observations
-
-- `admin.php` has no authentication — `current_staff()` hardcodes staff ID 1. Any visitor can create documents. A session layer would be needed before production use.
-- Timezone is hardcoded to `America/Chicago` in `bootstrap.php`. SQLite's `datetime('now')` defaults to UTC — this could cause subtle scheduling bugs if deployed in a different region.
-
----
-
-## What I Would Do With More Time
-
-- Add timezone selector on the scheduling form
-- Allow editing publish date after document creation
-- Add CSRF protection on all forms
-- Add pagination and sorting for large document lists
-- Add audit log visibility in the admin UI
-- Explore SQLite FTS5 for smarter search
-
----
-
-## Running the Project
-
-Requires Docker with Compose.
-
-```bash
+Folio Take-Home — Shiva Kumar
+A small document-sharing app, extended with scheduled publishing, human-readable slugs, and title search.
+Setup
+Requires Docker (with Compose).
 docker compose up
-```
-
-Open [http://localhost:8000/admin.php](http://localhost:8000/admin.php)
-
-The first run builds the image (~30 seconds). Each `docker compose up` reseeds the database from scratch so you always start from a known state.
-
----
-
-## Running the Tests
-
-```bash
+Open http://localhost:8000. The first run builds the image (~30 seconds); subsequent runs start instantly.
+Each docker compose up re-seeds db.sqlite from scratch, so you always start with a known state.
+To run the tests:
 docker compose exec app php tests/test.php
-```
+What I Built
+1. Scheduled publishing
+Staff can set a publish_at date and time when creating a document. Before that time, recipients hitting the share link see a "Not yet available" message with the publish date. After that time, the document renders normally.
+The check happens at view time — no background job needed at this scale.
+2. Human-readable slugs
+Every document gets a slug auto-generated from its title plus a 4-character random hex suffix — e.g. welcome-packet-a3f1.
+Slugs complement the existing hex token rather than replacing it. Recipients still access documents via the unguessable hex token. Slugs are staff-facing identifiers only — shown in the admin table and document view, useful for referencing in conversation or email.
+This keeps the existing privacy and link-permanence guarantees intact.
+3. Share by name
+Staff can search for a document by title on both the admin page and the share page. Search uses SQLite LIKE with a %term% pattern — case-insensitive substring match.
+I chose LIKE over fuzzy search because it is predictable and fast enough for an internal tool. At larger scale I would switch to SQLite FTS5 or Postgres tsvector.
+Migrations
+Schema changes live in migrations/ as plain SQL files, applied in order by seed.php at startup:
+migrations/
+001_add_publish_at.sql
+002_add_slug.sql
+I chose flat SQL files over a migration framework — simpler, no dependencies, easy to audit. seed.php runs them automatically on every fresh docker compose up.
+Things I noticed worth flagging
 
-All tests should show `passed, 0 failed`.
+The admin has no authentication — anyone can access it
+Share tokens never expire and are not truly one-time despite the README describing them that way
+No CSRF protection on forms
+All queries use PDO prepared statements (no SQL injection risk) and all output uses h() / htmlspecialchars (no XSS risk) — these are done correctly
 
----
+What I'd do with more time
 
-## Project Structure
+Token expiry and true one-time enforcement
+Authentication with a login page
+SQLite FTS5 for better search relevance
+Pagination on the document list
+Allow rescheduling publish_at after creation
 
-```
-lib/
-  bootstrap.php     # DB connection, helpers, audit log
-  layout.php        # Shared HTML header/footer
-public/
-  admin.php         # Staff admin — create documents, search, share
-  view.php          # Recipient view — enforces scheduling
-  share.php         # Share link generation
-tests/
-  test.php          # Automated tests
-schema.sql          # Base database schema
-seed.php            # Seeds database on startup
-```
+AI workflow
+I used Claude to generate boilerplate PHP matched to the existing code style, write migration files, and draft tests.
+I pushed back on one suggestion: Claude proposed using slugs as the recipient access mechanism. I rejected that — slugs are short and guessable by enumeration. The hex token stays as the access control layer. Slugs are identification, not authorization.
+I read every piece of generated code before saving it and verified all three features manually in the browser before running the test suite.

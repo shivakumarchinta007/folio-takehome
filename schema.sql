@@ -9,7 +9,6 @@ CREATE TABLE documents (
     title TEXT NOT NULL,
     body TEXT NOT NULL,
     created_by INTEGER NOT NULL,
-    publish_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (created_by) REFERENCES staff(id)
 );

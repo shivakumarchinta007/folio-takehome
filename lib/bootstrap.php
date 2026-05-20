@@ -46,3 +46,15 @@ function random_token(int $bytes = 16): string {
 function h(string $s): string {
     return htmlspecialchars($s, ENT_QUOTES, 'UTF-8');
 }
+
+function slugify(string $title, string $suffix): string {
+    $slug = strtolower(trim($title));
+    $slug = preg_replace('/[^a-z0-9]+/', '-', $slug);
+    $slug = trim($slug, '-');
+    $slug = substr($slug, 0, 40);
+    return $slug . '-' . $suffix;
+}
+
+function random_suffix(): string {
+    return substr(bin2hex(random_bytes(2)), 0, 4);
+}
